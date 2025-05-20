@@ -29,8 +29,8 @@ import torchvision.utils
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
-from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint,\
-    convert_splitbn_model, model_parameters
+from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, model_parameters
+from timm.models.layers import convert_splitbn_model
 from timm.utils import *
 from timm.loss import *
 from timm.optim import create_optimizer_v2, optimizer_kwargs
@@ -60,6 +60,7 @@ try:
 except ImportError: 
     has_wandb = False
 
+DTYPE=torch.bfloat16
 torch.backends.cudnn.benchmark = True
 _logger = logging.getLogger('train')
 
@@ -276,7 +277,7 @@ parser.add_argument('--amp', action='store_true', default=False,
                     help='use NVIDIA Apex AMP or Native AMP for mixed precision training')
 parser.add_argument('--apex-amp', action='store_true', default=False,
                     help='Use NVIDIA Apex AMP mixed precision')
-parser.add_argument('--native-amp', action='store_true', default=False,
+parser.add_argument('--native-amp', action='store_true', default=True,
                     help='Use Native Torch AMP mixed precision')
 parser.add_argument('--no-ddp-bb', action='store_true', default=False,
                     help='Force broadcast buffers for native DDP to off.')
@@ -377,7 +378,6 @@ def main():
         drop_path_rate=args.drop_path,
         drop_block_rate=args.drop_block,
         global_pool=args.gp,
-        bn_tf=args.bn_tf,
         bn_momentum=args.bn_momentum,
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
@@ -437,7 +437,7 @@ def main():
         if args.local_rank == 0:
             _logger.info('Using NVIDIA APEX AMP. Training in mixed precision.')
     elif use_amp == 'native':
-        amp_autocast = torch.cuda.amp.autocast
+        amp_autocast = torch.amp.autocast(device_type="cuda", dtype=DTYPE)
         loss_scaler = NativeScaler()
         if args.local_rank == 0:
             _logger.info('Using native Torch AMP. Training in mixed precision.')
@@ -454,6 +454,7 @@ def main():
             loss_scaler=None if args.no_resume_opt else loss_scaler,
             log_info=args.local_rank == 0)
 
+    model = torch.compile(model)
     # setup exponential moving average of model weights, SWA could be used here too
     model_ema = None
     if args.model_ema:
@@ -689,7 +690,7 @@ def train_one_epoch(
         if args.channels_last:
             input = input.contiguous(memory_format=torch.channels_last)
 
-        with amp_autocast():
+        with amp_autocast:
             output = model(input)
             loss = loss_fn(output, target)
 
@@ -785,7 +786,7 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
             if args.channels_last:
                 input = input.contiguous(memory_format=torch.channels_last)
 
-            with amp_autocast():
+            with amp_autocast:
                 output = model(input)
             if isinstance(output, (tuple, list)):
                 output = output[0]
